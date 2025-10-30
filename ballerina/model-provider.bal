@@ -109,10 +109,10 @@ public isolated client class OpenAiModelProvider {
             stop,
             messages: check self.mapToChatCompletionRequestMessage(messages),
             temperature: self.temperature,
-            max_tokens: self.maxTokens
+            "max_completion_tokens": self.maxTokens
         };
         if tools.length() > 0 {
-            request.functions = tools;
+            request.tools = tools.'map(t => <chat:ChatCompletionTool>{'type: "function", 'function: {description: t.description, name: t.name, parameters: t.parameters ?: {}}});
             span.addTools(tools);
         }
         chat:CreateChatCompletionResponse|error response =
@@ -156,7 +156,8 @@ public isolated client class OpenAiModelProvider {
 
         chat:ChatCompletionResponseMessage? message = choices[0].message;
         ai:ChatAssistantMessage chatAssistantMessage = {role: ai:ASSISTANT, content: message?.content};
-        chat:ChatCompletionFunctionCall? functionCall = message?.function_call;
+        // chat:ChatCompletionFunctionCall? functionCall = message?.function_call;
+        chat:ChatCompletionMessageToolCall[]? functionCall = message?.tool_calls;
         if functionCall is () {
             span.addOutputMessages(chatAssistantMessage);
             span.close();
@@ -196,25 +197,48 @@ public isolated client class OpenAiModelProvider {
                 chat:ChatCompletionRequestMessage assistantMessage = {role: ai:ASSISTANT};
                 ai:FunctionCall[]? toolCalls = message.toolCalls;
                 if toolCalls is ai:FunctionCall[] {
-                    assistantMessage["function_call"] = {
-                        name: toolCalls[0].name,
-                        arguments: toolCalls[0].arguments.toJsonString()
-                    };
+                    assistantMessage["tool_calls"] = [{
+                        id: toolCalls[0].id,
+                        'type: "function",
+                         'function:  {
+                            name: toolCalls[0].name,
+                            arguments: toolCalls[0].arguments.toJsonString()
+                         }
+                    }];
+                    assistantMessage["tool_call_id"] = toolCalls[0].id;
                 }
                 if message?.content is string {
                     assistantMessage["content"] = message?.content;
                 }
                 chatCompletionRequestMessages.push(assistantMessage);
             } else {
-                chatCompletionRequestMessages.push(message);
+                // ai:ChatFunctionMessage functionMsg = message;
+                map<json> fn = {...message};
+                fn["role"] = "tool";
+                fn["tool_call_id"] = message.id;
+                chat:ChatCompletionRequestMessage res = checkpanic fn.cloneWithType();
+                chatCompletionRequestMessages.push(res);
             }
         }
         return chatCompletionRequestMessages;
     }
 
-    private isolated function mapToFunctionCall(chat:ChatCompletionFunctionCall functionCall)
+    private isolated function mapToFunctionCall(chat:ChatCompletionFunctionCall|chat:ChatCompletionMessageToolCall[] functionCall)
     returns ai:FunctionCall|ai:LlmError {
+
         do {
+
+            if functionCall is chat:ChatCompletionMessageToolCall[] {
+                json jsonArgs = check (functionCall[0].'function.arguments).fromJsonString();
+                map<json>? arguments = check jsonArgs.cloneWithType();
+                ai:FunctionCall f = {
+                    id: functionCall[0].id,
+                    name: functionCall[0].'function.name,
+                    arguments
+                };
+                return f;
+            }
+
             json jsonArgs = check functionCall.arguments.fromJsonString();
             map<json>? arguments = check jsonArgs.cloneWithType();
             return {name: functionCall.name, arguments};
